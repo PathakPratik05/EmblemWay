@@ -1,0 +1,720 @@
+// EmblemWay database schema (PostgreSQL 16 + PostGIS 3.5)
+//
+// Conventions
+//  * UUID primary keys, snake_case table/column names.
+//  * All timestamps are `timestamptz` and stored in UTC.
+//  * PostGIS columns are declared as Unsupported(...) and are read/written with
+//    raw SQL in the repositories. Spatial GiST indexes and CHECK constraints that
+//    Prisma cannot express are added in the migration SQL files.
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+  binaryTargets   = ["native", "linux-musl-openssl-3.0.x", "debian-openssl-3.0.x"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [postgis, pgcrypto]
+}
+
+// ───────────────────────────── Enums ─────────────────────────────
+
+enum UserRole {
+  USER
+  ADMIN
+  SUPER_ADMIN
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+  DELETED
+}
+
+enum OtpPurpose {
+  LOGIN
+}
+
+enum JourneyStatus {
+  DRAFT
+  PLANNED
+  ACTIVE
+  COMPLETED
+  CANCELLED
+  EXPIRED
+}
+
+enum JourneyPurpose {
+  COMMUTE
+  BUSINESS
+  EDUCATION
+  LEISURE
+  ERRAND
+  OTHER
+}
+
+enum LocationKind {
+  SOURCE
+  DESTINATION
+  PICKUP
+}
+
+enum RoutingProfile {
+  DRIVE
+  TWO_WHEELER
+  BICYCLE
+  WALK
+}
+
+enum MatchType {
+  SAME_ROUTE
+  SAME_DESTINATION
+  SHARED_START
+  PARTIAL_OVERLAP
+}
+
+enum MatchConfidence {
+  HIGH
+  MEDIUM
+  LOW
+}
+
+enum TrafficEstimateStatus {
+  OK
+  UNSUPPORTED
+  UNAVAILABLE
+}
+
+enum HotspotModel {
+  JOURNEY_DEMAND
+  TRAFFIC
+  ORIGIN
+  DESTINATION
+}
+
+enum RidePoolOfferStatus {
+  OPEN
+  FULL
+  CLOSED
+  CANCELLED
+}
+
+enum RidePoolRequestStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
+  WITHDRAWN
+  CANCELLED
+}
+
+enum NotificationType {
+  JOURNEY_REMINDER
+  MATCH_FOUND
+  JOURNEY_STATUS
+  TRAFFIC_ALERT
+  RIDE_POOL
+  SYSTEM
+}
+
+enum PushStatus {
+  PENDING
+  SENT
+  FAILED
+  SKIPPED
+}
+
+enum SavedPlaceLabel {
+  HOME
+  WORK
+  OTHER
+}
+
+// ───────────────────────────── Reference data ─────────────────────────────
+
+model City {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  code            String   @unique @db.VarChar(32)
+  name            String   @db.VarChar(100)
+  state           String   @db.VarChar(100)
+  countryCode     String   @default("IN") @map("country_code") @db.Char(2)
+  timezone        String   @default("Asia/Kolkata") @db.VarChar(64)
+  centerLatitude  Float    @map("center_latitude")
+  centerLongitude Float    @map("center_longitude")
+  radiusMeters    Int      @map("radius_meters")
+  isActive        Boolean  @default(false) @map("is_active")
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  profiles      UserProfile[]
+  journeys      Journey[]
+  routeSegments RouteSegment[]
+  hotspots      HotspotAggregation[]
+
+  @@map("cities")
+}
+
+model VehicleType {
+  id                String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  code              String         @unique @db.VarChar(32)
+  name              String         @db.VarChar(64)
+  icon              String         @db.VarChar(64)
+  routingProfile    RoutingProfile @map("routing_profile")
+  /// Whether the routing provider can produce traffic-aware estimates for this profile.
+  trafficSupported  Boolean        @map("traffic_supported")
+  /// Human-readable caveat when the routing profile is an approximation (e.g. trucks use car routing).
+  approximationNote String?        @map("approximation_note") @db.VarChar(255)
+  poolingEligible   Boolean        @default(false) @map("pooling_eligible")
+  defaultSeats      Int            @default(1) @map("default_seats") @db.SmallInt
+  sortOrder         Int            @default(0) @map("sort_order") @db.SmallInt
+  isActive          Boolean        @default(true) @map("is_active")
+  createdAt         DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime       @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  userVehicles UserVehicle[]
+  journeys     Journey[]
+  profiles     UserProfile[]
+  savedRoutes  SavedRoute[]
+
+  @@map("vehicle_types")
+}
+
+// ───────────────────────────── Users & auth ─────────────────────────────
+
+model User {
+  id               String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  role             UserRole   @default(USER)
+  status           UserStatus @default(ACTIVE)
+  firstName        String     @map("first_name") @db.VarChar(60)
+  lastName         String     @map("last_name") @db.VarChar(60)
+  /// E.164 formatted number. NULL once an account is deleted (anonymised).
+  phoneE164        String?    @map("phone_e164") @db.VarChar(20)
+  phoneCountryCode String?    @map("phone_country_code") @db.VarChar(5)
+  email            String?    @db.VarChar(254)
+  /// scrypt hash - only used for admin dashboard accounts.
+  passwordHash     String?    @map("password_hash") @db.VarChar(255)
+  lastLoginAt      DateTime?  @map("last_login_at") @db.Timestamptz(6)
+  createdAt        DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime   @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt        DateTime?  @map("deleted_at") @db.Timestamptz(6)
+
+  profile          UserProfile?
+  sessions         UserSession[]
+  vehicles         UserVehicle[]
+  journeys         Journey[]
+  matchedIn        JourneyMatch[]    @relation("MatchedUser")
+  savedPlaces      SavedPlace[]
+  savedRoutes      SavedRoute[]
+  notifications    Notification[]
+  deviceTokens     DeviceToken[]
+  ridePoolOffers   RidePoolOffer[]
+  ridePoolRequests RidePoolRequest[]
+  ridePoolMembers  RidePoolMember[]
+  auditLogs        AuditLog[]
+
+  // Partial unique indexes (phone among non-deleted users, email for admins) live in migration SQL.
+  @@index([status])
+  @@index([createdAt])
+  @@map("users")
+}
+
+model UserProfile {
+  id                       String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId                   String    @unique @map("user_id") @db.Uuid
+  profileImagePath         String?   @map("profile_image_path") @db.VarChar(255)
+  preferredCityId          String?   @map("preferred_city_id") @db.Uuid
+  defaultVehicleTypeId     String?   @map("default_vehicle_type_id") @db.Uuid
+  /// Allow this user's journeys to be included in other users' match results.
+  shareJourneysForMatching Boolean   @default(true) @map("share_journeys_for_matching")
+  /// Show first name (never phone) to matched travellers. Otherwise "EmblemWay traveller".
+  showFirstNameToMatches   Boolean   @default(true) @map("show_first_name_to_matches")
+  notifyJourneyReminders   Boolean   @default(true) @map("notify_journey_reminders")
+  notifyMatches            Boolean   @default(true) @map("notify_matches")
+  notifyStatusUpdates      Boolean   @default(true) @map("notify_status_updates")
+  notifyTrafficAlerts      Boolean   @default(true) @map("notify_traffic_alerts")
+  locationConsentAt        DateTime? @map("location_consent_at") @db.Timestamptz(6)
+  profileCompletedAt       DateTime? @map("profile_completed_at") @db.Timestamptz(6)
+  createdAt                DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt                DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  user               User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  preferredCity      City?        @relation(fields: [preferredCityId], references: [id], onDelete: SetNull)
+  defaultVehicleType VehicleType? @relation(fields: [defaultVehicleTypeId], references: [id], onDelete: SetNull)
+
+  @@map("user_profiles")
+}
+
+model UserSession {
+  id               String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId           String    @map("user_id") @db.Uuid
+  /// Refresh tokens are rotated; every rotation in a login shares the same family.
+  familyId         String    @map("family_id") @db.Uuid
+  refreshTokenHash String    @unique @map("refresh_token_hash") @db.Char(64)
+  replacedById     String?   @unique @map("replaced_by_id") @db.Uuid
+  deviceId         String?   @map("device_id") @db.VarChar(128)
+  deviceName       String?   @map("device_name") @db.VarChar(128)
+  platform         String?   @db.VarChar(16)
+  ipAddress        String?   @map("ip_address") @db.VarChar(64)
+  userAgent        String?   @map("user_agent") @db.VarChar(255)
+  expiresAt        DateTime  @map("expires_at") @db.Timestamptz(6)
+  lastUsedAt       DateTime? @map("last_used_at") @db.Timestamptz(6)
+  rotatedAt        DateTime? @map("rotated_at") @db.Timestamptz(6)
+  revokedAt        DateTime? @map("revoked_at") @db.Timestamptz(6)
+  revokedReason    String?   @map("revoked_reason") @db.VarChar(64)
+  createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  user       User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  replacedBy UserSession? @relation("SessionRotation", fields: [replacedById], references: [id], onDelete: SetNull)
+  replaces   UserSession? @relation("SessionRotation")
+
+  @@index([userId])
+  @@index([familyId])
+  @@index([expiresAt])
+  @@map("user_sessions")
+}
+
+model OtpVerification {
+  id                String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  phoneE164         String     @map("phone_e164") @db.VarChar(20)
+  purpose           OtpPurpose @default(LOGIN)
+  /// HMAC-SHA256(pepper, requestId:code) - the OTP itself is never stored.
+  codeHash          String     @map("code_hash") @db.Char(64)
+  attempts          Int        @default(0) @db.SmallInt
+  maxAttempts       Int        @map("max_attempts") @db.SmallInt
+  expiresAt         DateTime   @map("expires_at") @db.Timestamptz(6)
+  resendAvailableAt DateTime   @map("resend_available_at") @db.Timestamptz(6)
+  consumedAt        DateTime?  @map("consumed_at") @db.Timestamptz(6)
+  lockedAt          DateTime?  @map("locked_at") @db.Timestamptz(6)
+  supersededAt      DateTime?  @map("superseded_at") @db.Timestamptz(6)
+  ipAddress         String?    @map("ip_address") @db.VarChar(64)
+  provider          String     @db.VarChar(32)
+  createdAt         DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([phoneE164, createdAt])
+  @@index([ipAddress, createdAt])
+  @@index([expiresAt])
+  @@map("otp_verifications")
+}
+
+model DeviceToken {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  token     String   @unique @db.VarChar(512)
+  platform  String   @default("android") @db.VarChar(16)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("device_tokens")
+}
+
+// ───────────────────────────── Vehicles ─────────────────────────────
+
+model UserVehicle {
+  id            String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId        String    @map("user_id") @db.Uuid
+  vehicleTypeId String    @map("vehicle_type_id") @db.Uuid
+  nickname      String?   @db.VarChar(60)
+  makeModel     String?   @map("make_model") @db.VarChar(80)
+  color         String?   @db.VarChar(30)
+  seats         Int?      @db.SmallInt
+  isDefault     Boolean   @default(false) @map("is_default")
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt     DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  vehicleType VehicleType @relation(fields: [vehicleTypeId], references: [id], onDelete: Restrict)
+  journeys    Journey[]
+
+  @@index([userId])
+  @@map("user_vehicles")
+}
+
+// ───────────────────────────── Journeys ─────────────────────────────
+
+model Journey {
+  id                 String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId             String         @map("user_id") @db.Uuid
+  cityId             String?        @map("city_id") @db.Uuid
+  vehicleTypeId      String         @map("vehicle_type_id") @db.Uuid
+  userVehicleId      String?        @map("user_vehicle_id") @db.Uuid
+  status             JourneyStatus  @default(PLANNED)
+  purpose            JourneyPurpose @default(COMMUTE)
+  departureAt        DateTime       @map("departure_at") @db.Timestamptz(6)
+  estimatedArrivalAt DateTime?      @map("estimated_arrival_at") @db.Timestamptz(6)
+  /// IANA timezone the user planned in (display only; departure_at is UTC).
+  timezone           String         @default("Asia/Kolkata") @db.VarChar(64)
+  notes              String?        @db.VarChar(280)
+  idempotencyKey     String?        @map("idempotency_key") @db.VarChar(64)
+  /// Optimistic concurrency token - incremented on every update.
+  version            Int            @default(1)
+  startedAt          DateTime?      @map("started_at") @db.Timestamptz(6)
+  completedAt        DateTime?      @map("completed_at") @db.Timestamptz(6)
+  cancelledAt        DateTime?      @map("cancelled_at") @db.Timestamptz(6)
+  cancelReason       String?        @map("cancel_reason") @db.VarChar(200)
+  expiredAt          DateTime?      @map("expired_at") @db.Timestamptz(6)
+  matchesComputedAt  DateTime?      @map("matches_computed_at") @db.Timestamptz(6)
+  locationsPurgedAt  DateTime?      @map("locations_purged_at") @db.Timestamptz(6)
+  createdAt          DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt          DateTime       @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  user          User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  city          City?                 @relation(fields: [cityId], references: [id], onDelete: SetNull)
+  vehicleType   VehicleType           @relation(fields: [vehicleTypeId], references: [id], onDelete: Restrict)
+  userVehicle   UserVehicle?          @relation(fields: [userVehicleId], references: [id], onDelete: SetNull)
+  locations     JourneyLocation[]
+  routes        JourneyRoute[]
+  matches       JourneyMatch[]        @relation("MatchSource")
+  matchedBy     JourneyMatch[]        @relation("MatchTarget")
+  segments      JourneyRouteSegment[]
+  trafficSnaps  TrafficSnapshot[]
+  ridePoolOffer RidePoolOffer?
+  poolRequests  RidePoolRequest[]
+
+  @@unique([userId, idempotencyKey])
+  @@index([status, departureAt])
+  @@index([userId, status, departureAt])
+  @@index([cityId, departureAt])
+  @@index([vehicleTypeId])
+  @@map("journeys")
+}
+
+model JourneyLocation {
+  id        String                               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  journeyId String                               @map("journey_id") @db.Uuid
+  kind      LocationKind
+  name      String                               @db.VarChar(200)
+  address   String?                              @db.VarChar(400)
+  placeId   String?                              @map("place_id") @db.VarChar(255)
+  latitude  Float
+  longitude Float
+  geom      Unsupported("geometry(Point, 4326)")
+  createdAt DateTime                             @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  journey Journey @relation(fields: [journeyId], references: [id], onDelete: Cascade)
+
+  @@unique([journeyId, kind])
+  @@map("journey_locations")
+}
+
+model JourneyRoute {
+  id                    String                                    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  journeyId             String                                    @map("journey_id") @db.Uuid
+  /// Exactly one selected route per journey (partial unique index in SQL). Others are alternatives.
+  isSelected            Boolean                                   @default(true) @map("is_selected")
+  alternativeIndex      Int                                       @default(0) @map("alternative_index") @db.SmallInt
+  provider              String                                    @db.VarChar(32)
+  routingProfile        RoutingProfile                            @map("routing_profile")
+  encodedPolyline       String                                    @map("encoded_polyline")
+  geom                  Unsupported("geometry(LineString, 4326)")
+  distanceMeters        Int                                       @map("distance_meters")
+  durationSeconds       Int                                       @map("duration_seconds")
+  staticDurationSeconds Int?                                      @map("static_duration_seconds")
+  computedAt            DateTime                                  @default(now()) @map("computed_at") @db.Timestamptz(6)
+
+  journey Journey @relation(fields: [journeyId], references: [id], onDelete: Cascade)
+
+  @@index([journeyId])
+  @@map("journey_routes")
+}
+
+model JourneyMatch {
+  id                         String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  journeyId                  String          @map("journey_id") @db.Uuid
+  matchedJourneyId           String          @map("matched_journey_id") @db.Uuid
+  matchedUserId              String          @map("matched_user_id") @db.Uuid
+  matchType                  MatchType       @map("match_type")
+  sharedDistanceMeters       Int             @map("shared_distance_meters")
+  /// Fraction (0..1) of THIS journey's route that is shared.
+  overlapRatioSelf           Float           @map("overlap_ratio_self")
+  /// Fraction (0..1) of the MATCHED journey's route that is shared.
+  overlapRatioOther          Float           @map("overlap_ratio_other")
+  directionSimilarity        Float           @map("direction_similarity")
+  departureDiffSeconds       Int             @map("departure_diff_seconds")
+  convergenceTimeDiffSeconds Int             @map("convergence_time_diff_seconds")
+  pickupDistanceMeters       Int             @map("pickup_distance_meters")
+  destinationDistanceMeters  Int             @map("destination_distance_meters")
+  score                      Float
+  confidence                 MatchConfidence
+  commonSegmentPolyline      String?         @map("common_segment_polyline")
+  computedAt                 DateTime        @default(now()) @map("computed_at") @db.Timestamptz(6)
+
+  journey        Journey @relation("MatchSource", fields: [journeyId], references: [id], onDelete: Cascade)
+  matchedJourney Journey @relation("MatchTarget", fields: [matchedJourneyId], references: [id], onDelete: Cascade)
+  matchedUser    User    @relation("MatchedUser", fields: [matchedUserId], references: [id], onDelete: Cascade)
+
+  @@unique([journeyId, matchedJourneyId])
+  @@index([matchedJourneyId])
+  @@index([journeyId, score])
+  @@map("journey_matches")
+}
+
+/// A road-corridor cell: routes are sampled and snapped to a metric grid, giving a
+/// stable key that lets us count how many journeys traverse the same stretch of road.
+model RouteSegment {
+  id              String                                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  cityId          String?                                @map("city_id") @db.Uuid
+  cellKey         String                                 @unique @map("cell_key") @db.VarChar(64)
+  centerLatitude  Float                                  @map("center_latitude")
+  centerLongitude Float                                  @map("center_longitude")
+  geom            Unsupported("geometry(Polygon, 4326)")
+  createdAt       DateTime                               @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  city     City?                 @relation(fields: [cityId], references: [id], onDelete: SetNull)
+  journeys JourneyRouteSegment[]
+
+  @@index([cityId])
+  @@map("route_segments")
+}
+
+model JourneyRouteSegment {
+  journeyId String @map("journey_id") @db.Uuid
+  segmentId String @map("segment_id") @db.Uuid
+  /// Order along the route (first time the route enters the cell).
+  sequence  Int
+
+  journey Journey      @relation(fields: [journeyId], references: [id], onDelete: Cascade)
+  segment RouteSegment @relation(fields: [segmentId], references: [id], onDelete: Cascade)
+
+  @@id([journeyId, segmentId])
+  @@index([segmentId])
+  @@map("journey_route_segments")
+}
+
+// ───────────────────────────── Traffic & hotspots ─────────────────────────────
+
+model TrafficSnapshot {
+  id                     String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  journeyId              String?               @map("journey_id") @db.Uuid
+  routeKey               String                @map("route_key") @db.VarChar(128)
+  routingProfile         RoutingProfile        @map("routing_profile")
+  departureOffsetMinutes Int                   @map("departure_offset_minutes") @db.SmallInt
+  requestedDepartureAt   DateTime              @map("requested_departure_at") @db.Timestamptz(6)
+  status                 TrafficEstimateStatus
+  durationSeconds        Int?                  @map("duration_seconds")
+  staticDurationSeconds  Int?                  @map("static_duration_seconds")
+  distanceMeters         Int?                  @map("distance_meters")
+  /// Per-interval speed categories (NORMAL/SLOW/TRAFFIC_JAM) with their coordinates.
+  speedIntervals         Json?                 @map("speed_intervals")
+  provider               String                @db.VarChar(32)
+  errorCode              String?               @map("error_code") @db.VarChar(64)
+  fetchedAt              DateTime              @default(now()) @map("fetched_at") @db.Timestamptz(6)
+
+  journey Journey? @relation(fields: [journeyId], references: [id], onDelete: SetNull)
+
+  @@index([routeKey, fetchedAt])
+  @@index([fetchedAt])
+  @@map("traffic_snapshots")
+}
+
+model HotspotAggregation {
+  id              String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  cityId          String?      @map("city_id") @db.Uuid
+  model           HotspotModel
+  cellKey         String       @map("cell_key") @db.VarChar(64)
+  centerLatitude  Float        @map("center_latitude")
+  centerLongitude Float        @map("center_longitude")
+  cellSizeMeters  Int          @map("cell_size_meters")
+  bucketStart     DateTime     @map("bucket_start") @db.Timestamptz(6)
+  bucketMinutes   Int          @map("bucket_minutes")
+  /// 'ALL' or a vehicle_types.code.
+  vehicleTypeCode String       @default("ALL") @map("vehicle_type_code") @db.VarChar(32)
+  journeyCount    Int          @default(0) @map("journey_count")
+  distinctUsers   Int          @default(0) @map("distinct_users")
+  /// TRAFFIC model only: 0 (free flow) .. 1 (jammed), averaged over samples.
+  congestionIndex Float?       @map("congestion_index")
+  sampleCount     Int          @default(0) @map("sample_count")
+  computedAt      DateTime     @default(now()) @map("computed_at") @db.Timestamptz(6)
+
+  city City? @relation(fields: [cityId], references: [id], onDelete: SetNull)
+
+  @@unique([model, cellKey, bucketStart, bucketMinutes, vehicleTypeCode], map: "hotspot_unique_cell_bucket")
+  @@index([cityId, model, bucketStart])
+  @@map("hotspot_aggregations")
+}
+
+// ───────────────────────────── Ride pooling ─────────────────────────────
+
+model RidePoolOffer {
+  id             String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  journeyId      String              @unique @map("journey_id") @db.Uuid
+  ownerUserId    String              @map("owner_user_id") @db.Uuid
+  totalSeats     Int                 @map("total_seats") @db.SmallInt
+  availableSeats Int                 @map("available_seats") @db.SmallInt
+  status         RidePoolOfferStatus @default(OPEN)
+  notes          String?             @db.VarChar(280)
+  createdAt      DateTime            @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime            @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  journey  Journey           @relation(fields: [journeyId], references: [id], onDelete: Cascade)
+  owner    User              @relation(fields: [ownerUserId], references: [id], onDelete: Cascade)
+  requests RidePoolRequest[]
+  members  RidePoolMember[]
+
+  @@index([status])
+  @@map("ride_pool_offers")
+}
+
+model RidePoolRequest {
+  id                 String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  offerId            String                @map("offer_id") @db.Uuid
+  requesterUserId    String                @map("requester_user_id") @db.Uuid
+  requesterJourneyId String?               @map("requester_journey_id") @db.Uuid
+  seats              Int                   @default(1) @db.SmallInt
+  status             RidePoolRequestStatus @default(PENDING)
+  message            String?               @db.VarChar(280)
+  decidedAt          DateTime?             @map("decided_at") @db.Timestamptz(6)
+  createdAt          DateTime              @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt          DateTime              @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  offer            RidePoolOffer   @relation(fields: [offerId], references: [id], onDelete: Cascade)
+  requester        User            @relation(fields: [requesterUserId], references: [id], onDelete: Cascade)
+  requesterJourney Journey?        @relation(fields: [requesterJourneyId], references: [id], onDelete: SetNull)
+  member           RidePoolMember?
+
+  // Partial unique index (one PENDING/ACCEPTED request per user per offer) lives in migration SQL.
+  @@index([offerId, status])
+  @@index([requesterUserId])
+  @@map("ride_pool_requests")
+}
+
+model RidePoolMember {
+  id        String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  offerId   String    @map("offer_id") @db.Uuid
+  userId    String    @map("user_id") @db.Uuid
+  requestId String    @unique @map("request_id") @db.Uuid
+  seats     Int       @db.SmallInt
+  joinedAt  DateTime  @default(now()) @map("joined_at") @db.Timestamptz(6)
+  leftAt    DateTime? @map("left_at") @db.Timestamptz(6)
+
+  offer   RidePoolOffer   @relation(fields: [offerId], references: [id], onDelete: Cascade)
+  user    User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  request RidePoolRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+
+  @@index([offerId])
+  @@index([userId])
+  @@map("ride_pool_members")
+}
+
+// ───────────────────────────── Notifications ─────────────────────────────
+
+model Notification {
+  id         String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId     String           @map("user_id") @db.Uuid
+  type       NotificationType
+  title      String           @db.VarChar(120)
+  body       String           @db.VarChar(500)
+  data       Json?
+  /// Prevents duplicate notifications for the same event (e.g. match:<a>:<b>).
+  dedupeKey  String?          @map("dedupe_key") @db.VarChar(160)
+  pushStatus PushStatus       @default(PENDING) @map("push_status")
+  readAt     DateTime?        @map("read_at") @db.Timestamptz(6)
+  sentAt     DateTime?        @map("sent_at") @db.Timestamptz(6)
+  createdAt  DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, dedupeKey])
+  @@index([userId, createdAt])
+  @@map("notifications")
+}
+
+// ───────────────────────────── Saved places & routes ─────────────────────────────
+
+model SavedPlace {
+  id        String                               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId    String                               @map("user_id") @db.Uuid
+  label     SavedPlaceLabel                      @default(OTHER)
+  name      String                               @db.VarChar(200)
+  address   String?                              @db.VarChar(400)
+  placeId   String?                              @map("place_id") @db.VarChar(255)
+  latitude  Float
+  longitude Float
+  geom      Unsupported("geometry(Point, 4326)")
+  createdAt DateTime                             @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime                             @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("saved_places")
+}
+
+model SavedRoute {
+  id                   String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId               String   @map("user_id") @db.Uuid
+  name                 String   @db.VarChar(80)
+  sourceName           String   @map("source_name") @db.VarChar(200)
+  sourceLatitude       Float    @map("source_latitude")
+  sourceLongitude      Float    @map("source_longitude")
+  sourcePlaceId        String?  @map("source_place_id") @db.VarChar(255)
+  destinationName      String   @map("destination_name") @db.VarChar(200)
+  destinationLatitude  Float    @map("destination_latitude")
+  destinationLongitude Float    @map("destination_longitude")
+  destinationPlaceId   String?  @map("destination_place_id") @db.VarChar(255)
+  pickupName           String?  @map("pickup_name") @db.VarChar(200)
+  pickupLatitude       Float?   @map("pickup_latitude")
+  pickupLongitude      Float?   @map("pickup_longitude")
+  vehicleTypeId        String?  @map("vehicle_type_id") @db.Uuid
+  /// Local "HH:mm" the user usually leaves at.
+  usualDepartureTime   String?  @map("usual_departure_time") @db.Char(5)
+  createdAt            DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt            DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  vehicleType VehicleType? @relation(fields: [vehicleTypeId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@map("saved_routes")
+}
+
+// ───────────────────────────── Platform ─────────────────────────────
+
+model AppSetting {
+  key         String   @id @db.VarChar(64)
+  value       Json
+  updatedById String?  @map("updated_by_id") @db.Uuid
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@map("app_settings")
+}
+
+model IdempotencyRecord {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId       String   @map("user_id") @db.Uuid
+  key          String   @db.VarChar(64)
+  scope        String   @db.VarChar(64)
+  requestHash  String   @map("request_hash") @db.Char(64)
+  statusCode   Int?     @map("status_code") @db.SmallInt
+  responseBody Json?    @map("response_body")
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  expiresAt    DateTime @map("expires_at") @db.Timestamptz(6)
+
+  @@unique([userId, scope, key])
+  @@index([expiresAt])
+  @@map("idempotency_records")
+}
+
+model AuditLog {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  actorUserId String?   @map("actor_user_id") @db.Uuid
+  actorRole   UserRole? @map("actor_role")
+  action      String    @db.VarChar(64)
+  entityType  String?   @map("entity_type") @db.VarChar(64)
+  entityId    String?   @map("entity_id") @db.VarChar(64)
+  requestId   String?   @map("request_id") @db.VarChar(64)
+  ipAddress   String?   @map("ip_address") @db.VarChar(64)
+  metadata    Json?
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  actor User? @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@index([action, createdAt])
+  @@index([actorUserId, createdAt])
+  @@index([createdAt])
+  @@map("audit_logs")
+}

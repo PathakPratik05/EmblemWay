@@ -1,0 +1,39 @@
+# Dependencies
+node_modules/
+.pnp*
+
+# Build output
+dist/
+build/
+.next/
+out/
+coverage/
+*.tsbuildinfo
+
+# Environment / secrets (never commit)
+.env
+.env.*
+!.env.example
+!.env.test.example
+*.keystore
+!debug.keystore
+google-services.json
+service-account*.json
+firebase-adminsdk*.json
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.log
+
+# Android / React Native
+mobile/android/.gradle/
+mobile/android/app/build/
+mobile/android/build/
+mobile/android/local.properties
+mobile/android/app/src/main/assets/index.android.bundle
+mobile/artifacts/
+mobile/.bundle/
+mobile/vendor/
+backend/uploads/
