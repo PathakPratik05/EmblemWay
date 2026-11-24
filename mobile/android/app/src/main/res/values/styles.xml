@@ -1,0 +1,13 @@
+<resources>
+
+    <!-- Base application theme (EmblemWay UI is designed for a light appearance). -->
+    <style name="AppTheme" parent="Theme.AppCompat.Light.NoActionBar">
+        <item name="android:editTextBackground">@drawable/rn_edit_text_material</item>
+        <!-- Branded background shown during cold start, before the JS splash renders. -->
+        <item name="android:windowBackground">@drawable/launch_screen</item>
+        <item name="android:statusBarColor">#1B4D89</item>
+        <item name="colorPrimary">#1B4D89</item>
+        <item name="colorAccent">#F2A81D</item>
+    </style>
+
+</resources>

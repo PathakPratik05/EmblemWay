@@ -5,7 +5,14 @@
  */
 import { PrismaClient, RoutingProfile } from '@prisma/client';
 import { randomBytes, scrypt } from 'node:crypto';
-import 'dotenv/config';
+
+// Load .env for local runs; containers receive configuration as real environment variables.
+try {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  require('dotenv/config');
+} catch {
+  /* dotenv not installed in production images */
+}
 
 const prisma = new PrismaClient();
 

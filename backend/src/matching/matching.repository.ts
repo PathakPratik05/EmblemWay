@@ -12,6 +12,8 @@ const SIMPLIFY_MEASURE_DEG = 0.00003; // ~3 m
 const SIMPLIFY_PREFILTER_DEG = 0.0001; // ~11 m
 const SIMPLIFY_PREFILTER_SLACK_M = 12;
 const SEGMENTIZE_DEG = 0.01; // ~1 km
+/** Metres per degree of longitude at 37.5°N (northern edge of the service area) - the minimum. */
+const PLANAR_METERS_PER_DEGREE_MIN = 111_320 * Math.cos((37.5 * Math.PI) / 180);
 const simplified = (col: Prisma.Sql, tol: number) =>
   Prisma.sql`ST_Segmentize(ST_Simplify(${col}, ${tol}::float8), ${SEGMENTIZE_DEG}::float8)::geography`;
 
@@ -177,9 +179,9 @@ export class MatchingRepository {
     >`
       WITH a AS (SELECT geom FROM journey_routes WHERE journey_id = ${journeyId}::uuid AND is_selected),
       pts AS (
-        SELECT 0 AS idx, ST_StartPoint(a.geom)::geography AS pt FROM a
+        SELECT 0 AS idx, ST_StartPoint(a.geom) AS pt FROM a
         UNION ALL
-        SELECT dp.path[1] AS idx, dp.geom::geography AS pt
+        SELECT dp.path[1] AS idx, dp.geom AS pt
           FROM a, LATERAL ST_DumpPoints(ST_LineInterpolatePoints(a.geom::geography, ${fraction}::float8, true, true)::geometry) dp
       ),
       c AS (
@@ -187,8 +189,13 @@ export class MatchingRepository {
           FROM journey_routes
          WHERE is_selected AND journey_id IN (${Prisma.join(candidateIds.map((id) => Prisma.sql`${id}::uuid`))})
       )
-      SELECT c.journey_id, pts.idx, ST_LineLocatePoint(c.g, pts.pt) AS frac
-        FROM c JOIN pts ON ST_DWithin(pts.pt, c.g, ${corridorMeters})`;
+      SELECT c.journey_id, pts.idx, ST_LineLocatePoint(c.g::geometry, pts.pt) AS frac
+        FROM c JOIN pts
+          -- Cheap planar pre-check (superset: tolerance sized for the highest service latitude),
+          -- then the exact spheroidal test only for the pairs that survive. The position along B
+          -- (frac) is planar: its error is far below the engine's jump/direction tolerances.
+          ON ST_DWithin(pts.pt, c.g::geometry, ${corridorMeters / PLANAR_METERS_PER_DEGREE_MIN}::float8)
+         AND ST_DWithin(pts.pt::geography, c.g, ${corridorMeters})`;
     for (const r of rows) {
       let m = hits.get(r.journey_id);
       if (!m) {

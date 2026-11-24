@@ -1,0 +1,151 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend (lint · typecheck · unit · integration)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      postgres:
+        image: postgis/postgis:16-3.5
+        env:
+          POSTGRES_USER: emblemway
+          POSTGRES_PASSWORD: emblemway_ci_password
+          POSTGRES_DB: emblemway_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U emblemway -d emblemway_test" --health-interval 5s --health-timeout 5s --health-retries 20
+      redis:
+        image: redis:7.4-alpine
+        ports: ['6379:6379']
+        options: --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 3s --health-retries 20
+    env:
+      NODE_ENV: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - run: npm ci
+      - name: Test environment file
+        run: |
+          cp .env.test.example .env.test
+          sed -i 's#^DATABASE_URL=.*#DATABASE_URL=postgresql://emblemway:emblemway_ci_password@localhost:5432/emblemway_test?schema=public#' .env.test
+      - run: npx prisma generate
+      - run: npm run format:check
+      - run: npm run lint
+      - run: npm run typecheck
+      - name: Unit + integration tests with combined coverage (threshold 80 %)
+        run: npm run test:coverage
+      - run: npm run build
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: backend-coverage
+          path: backend/coverage/combined
+
+  mobile:
+    name: Mobile (lint · typecheck · jest)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+      - run: npm ci
+      - run: npx eslint . --ext .ts,.tsx --max-warnings 0
+      - run: npx tsc --noEmit
+      - run: npx jest --coverage --ci
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mobile-coverage
+          path: mobile/coverage
+
+  admin:
+    name: Admin dashboard (lint · typecheck · jest · build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: admin
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: admin/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npx jest --coverage --ci
+      - run: npx next build
+        env:
+          NEXT_TELEMETRY_DISABLED: '1'
+
+  android:
+    name: Android release APK
+    runs-on: ubuntu-latest
+    needs: mobile
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+      - run: npm ci
+      - name: Build release APK (debug-signed unless signing secrets are configured)
+        working-directory: mobile/android
+        env:
+          EMBLEMWAY_API_URL: ${{ vars.EMBLEMWAY_API_URL }}
+          EMBLEMWAY_MAPS_API_KEY: ${{ secrets.EMBLEMWAY_MAPS_API_KEY }}
+        run: ./gradlew assembleRelease --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: emblemway-release-apk
+          path: mobile/android/app/build/outputs/apk/release/*.apk
+
+  docker:
+    name: Docker images
+    runs-on: ubuntu-latest
+    needs: [backend, admin]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: backend
+          push: false
+          tags: emblemway/backend:ci
+      - uses: docker/build-push-action@v6
+        with:
+          context: admin
+          push: false
+          tags: emblemway/admin:ci

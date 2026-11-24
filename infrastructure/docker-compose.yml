@@ -53,6 +53,10 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-emblemway}:${POSTGRES_PASSWORD:-emblemway_dev_password}@postgres:5432/${POSTGRES_DB:-emblemway}?schema=public
       REDIS_URL: redis://redis:6379
       PORT: 3000
+      RUN_MIGRATIONS: 'true'
+      RUN_SEED: 'true'
+    volumes:
+      - uploads:/app/uploads
     ports:
       - '${BACKEND_HOST_PORT:-3000}:3000'
     depends_on:
@@ -66,9 +70,11 @@ services:
     build:
       context: ../admin
       dockerfile: Dockerfile
-      args:
-        NEXT_PUBLIC_API_BASE_URL: ${ADMIN_PUBLIC_API_BASE_URL:-http://localhost:3000/api/v1}
     restart: unless-stopped
+    environment:
+      # Server-side only (BFF): the browser never talks to the API directly.
+      ADMIN_API_BASE_URL: http://backend:3000/api/v1
+      ADMIN_SECURE_COOKIES: ${ADMIN_SECURE_COOKIES:-false}
     ports:
       - '${ADMIN_HOST_PORT:-3001}:3000'
     depends_on:
@@ -77,3 +83,4 @@ services:
 volumes:
   pgdata:
   redisdata:
+  uploads:

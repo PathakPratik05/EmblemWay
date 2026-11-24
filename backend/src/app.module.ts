@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, RequestMethod } from '@nestjs/common';
 import { APP_FILTER, APP_GUARD } from '@nestjs/core';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { LoggerModule } from 'nestjs-pino';
@@ -28,16 +28,28 @@ import { TrafficModule } from './traffic/traffic.module';
 import { UsersModule } from './users/users.module';
 import { VehiclesModule } from './vehicles/vehicles.module';
 
+/** Pretty logs only in local development and only if the dev dependency is installed. */
+function prettyLogsAvailable(): boolean {
+  if (process.env.NODE_ENV !== 'development') return false;
+  try {
+    require.resolve('pino-pretty');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 @Module({
   imports: [
     AppConfigModule,
     LoggerModule.forRoot({
+      // Express 5 path syntax (avoids the legacy '*' wildcard conversion warning).
+      forRoutes: [{ path: '{*path}', method: RequestMethod.ALL }],
       pinoHttp: {
         level: process.env.LOG_LEVEL ?? 'info',
-        transport:
-          process.env.NODE_ENV === 'development'
-            ? { target: 'pino-pretty', options: { singleLine: true } }
-            : undefined,
+        transport: prettyLogsAvailable()
+          ? { target: 'pino-pretty', options: { singleLine: true } }
+          : undefined,
         genReqId: (req: IncomingMessage) => (req as IncomingMessage & { id?: string }).id ?? '',
         customProps: (req: IncomingMessage) => ({
           userId: (req as IncomingMessage & { user?: { userId: string } }).user?.userId,

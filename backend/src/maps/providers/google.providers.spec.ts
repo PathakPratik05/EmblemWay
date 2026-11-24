@@ -279,16 +279,14 @@ describe('GooglePlacesProvider', () => {
   });
 
   it('returns details with location and rejects malformed place ids', async () => {
-    const f = jest
-      .fn()
-      .mockResolvedValue(
-        jsonResponse(200, {
-          id: 'ChIJabcdefghij',
-          displayName: { text: 'EON IT Park' },
-          formattedAddress: 'Kharadi',
-          location: { latitude: 18.55, longitude: 73.93 },
-        }),
-      );
+    const f = jest.fn().mockResolvedValue(
+      jsonResponse(200, {
+        id: 'ChIJabcdefghij',
+        displayName: { text: 'EON IT Park' },
+        formattedAddress: 'Kharadi',
+        location: { latitude: 18.55, longitude: 73.93 },
+      }),
+    );
     const p = new GooglePlacesProvider(client(f, 0), 'k', okQuota);
     await expect(p.details('ChIJabcdefghij', undefined)).resolves.toMatchObject({
       name: 'EON IT Park',

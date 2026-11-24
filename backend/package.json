@@ -14,7 +14,7 @@
     "start:prod": "node dist/main.js",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\" \"prisma/**/*.ts\"",
     "format:check": "prettier --check \"src/**/*.ts\" \"test/**/*.ts\" \"prisma/**/*.ts\"",
-    "lint": "eslint \"{src,test,prisma}/**/*.ts\" --max-warnings 0",
+    "lint": "eslint \"{src,test,prisma,scripts}/**/*.ts\" --max-warnings 0",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "jest --config jest.config.ts",
     "test:cov": "jest --config jest.config.ts --coverage",

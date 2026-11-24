@@ -37,3 +37,6 @@ mobile/artifacts/
 mobile/.bundle/
 mobile/vendor/
 backend/uploads/
+admin/.next/
+admin/next-env.d.ts
+mobile/e2e/artifacts/

@@ -50,10 +50,7 @@ describe('OTP senders', () => {
       await expect(
         s400.send({ phoneE164: '+91', code: '1', ttlSeconds: 60 }),
       ).rejects.toMatchObject({ retryable: false });
-      const sNet = new TwilioOtpSender(
-        cfg,
-        jest.fn().mockRejectedValue(new Error('ECONNRESET')),
-      );
+      const sNet = new TwilioOtpSender(cfg, jest.fn().mockRejectedValue(new Error('ECONNRESET')));
       await expect(
         sNet.send({ phoneE164: '+91', code: '1', ttlSeconds: 60 }),
       ).rejects.toBeInstanceOf(OtpDeliveryError);
